@@ -18,14 +18,9 @@ package containerd
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"syscall"
 
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/images"
 	"github.com/moby/sys/signal"
-	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // StopSignalLabel is a well-known containerd label for storing the stop
@@ -53,27 +48,9 @@ func GetOCIStopSignal(ctx context.Context, image Image, defaultSignal string) (s
 	if err != nil {
 		return "", err
 	}
-	ic, err := image.Config(ctx)
+	config, err := image.ConfigWithAttributes(ctx)
 	if err != nil {
 		return "", err
-	}
-	var (
-		ociimage v1.Image
-		config   v1.ImageConfig
-	)
-	switch ic.MediaType {
-	case v1.MediaTypeImageConfig, images.MediaTypeDockerSchema2Config:
-		p, err := content.ReadBlob(ctx, image.ContentStore(), ic)
-		if err != nil {
-			return "", err
-		}
-
-		if err := json.Unmarshal(p, &ociimage); err != nil {
-			return "", err
-		}
-		config = ociimage.Config
-	default:
-		return "", fmt.Errorf("unknown image config media type %s", ic.MediaType)
 	}
 
 	if config.StopSignal == "" {

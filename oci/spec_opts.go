@@ -28,16 +28,14 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/containerd/continuity/fs"
+	"github.com/opencontainers/runc/libcontainer/user"
+	"github.com/opencontainers/runtime-spec/specs-go"
+
 	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/continuity/fs"
-	v1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/opencontainers/runc/libcontainer/user"
-	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 // SpecOpts sets spec specific information to a newly generated OCI spec
@@ -351,32 +349,11 @@ func WithImageConfig(image Image) SpecOpts {
 // replaces the CMD of the image
 func WithImageConfigArgs(image Image, args []string) SpecOpts {
 	return func(ctx context.Context, client Client, c *containers.Container, s *Spec) error {
-		ic, err := image.Config(ctx)
+		config, err := image.ConfigWithAttributes(ctx)
 		if err != nil {
 			return err
 		}
-		var (
-			imageConfigBytes []byte
-			ociimage         v1.Image
-			config           v1.ImageConfig
-		)
-		switch ic.MediaType {
-		case v1.MediaTypeImageConfig, images.MediaTypeDockerSchema2Config:
-			var err error
-			imageConfigBytes, err = content.ReadBlob(ctx, image.ContentStore(), ic)
-			if err != nil {
-				return err
-			}
 
-			if err := json.Unmarshal(imageConfigBytes, &ociimage); err != nil {
-				return err
-			}
-			config = ociimage.Config
-		default:
-			return fmt.Errorf("unknown image config media type %s", ic.MediaType)
-		}
-
-		appendOSMounts(s, ociimage.OS)
 		setProcess(s)
 		if s.Linux != nil {
 			defaults := config.Env

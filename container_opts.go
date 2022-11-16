@@ -18,21 +18,18 @@ package containerd
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/containerd/typeurl"
+	"github.com/opencontainers/image-spec/identity"
+
 	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/protobuf"
 	"github.com/containerd/containerd/snapshots"
-	"github.com/containerd/typeurl"
-	"github.com/opencontainers/image-spec/identity"
-	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // DeleteOpts allows the caller to set options for the deletion of a container
@@ -116,28 +113,11 @@ func WithContainerLabels(labels map[string]string) NewContainerOpts {
 // to add/overwrite the existing image config labels.
 func WithImageConfigLabels(image Image) NewContainerOpts {
 	return func(ctx context.Context, _ *Client, c *containers.Container) error {
-		ic, err := image.Config(ctx)
+		config, err := image.ConfigWithAttributes(ctx)
 		if err != nil {
 			return err
 		}
-		var (
-			ociimage v1.Image
-			config   v1.ImageConfig
-		)
-		switch ic.MediaType {
-		case v1.MediaTypeImageConfig, images.MediaTypeDockerSchema2Config:
-			p, err := content.ReadBlob(ctx, image.ContentStore(), ic)
-			if err != nil {
-				return err
-			}
 
-			if err := json.Unmarshal(p, &ociimage); err != nil {
-				return err
-			}
-			config = ociimage.Config
-		default:
-			return fmt.Errorf("unknown image config media type %s", ic.MediaType)
-		}
 		c.Labels = config.Labels
 		return nil
 	}

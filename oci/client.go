@@ -19,9 +19,10 @@ package oci
 import (
 	"context"
 
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/snapshots"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // Client interface used by SpecOpt
@@ -31,6 +32,7 @@ type Client interface {
 
 // Image interface used by some SpecOpt to query image configuration
 type Image interface {
+	ConfigWithAttributes(ctx context.Context) (ocispec.ImageConfig, error)
 	// Config descriptor for the image.
 	Config(ctx context.Context) (ocispec.Descriptor, error)
 	// ContentStore provides a content store which contains image blob data

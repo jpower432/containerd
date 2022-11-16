@@ -23,12 +23,14 @@ import (
 	"sort"
 	"time"
 
+	digest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	v2 "github.com/uor-framework/uor-client-go/nodes/descriptor/v2"
+
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/platforms"
-	digest "github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // Image provides the model for how containerd views container images.
@@ -95,6 +97,14 @@ type Store interface {
 // configuration of the image.
 func (image *Image) Config(ctx context.Context, provider content.Provider, platform platforms.MatchComparer) (ocispec.Descriptor, error) {
 	return Config(ctx, provider, image.Target, platform)
+}
+
+// Config resolves the image configuration descriptor.
+//
+// The caller can then use the descriptor to resolve and process the
+// configuration of the image.
+func (image *Image) ConfigWithAttributes(ctx context.Context, provider content.Provider, platform platforms.MatchComparer) (ocispec.ImageConfig, error) {
+	return ConfigFromAttributes(ctx, provider, image.Target, platform)
 }
 
 // RootFS returns the unpacked diffids that make up and images rootfs.
@@ -260,7 +270,44 @@ func Config(ctx context.Context, provider content.Provider, image ocispec.Descri
 	if err != nil {
 		return ocispec.Descriptor{}, err
 	}
+
 	return manifest.Config, err
+}
+
+// ConfigFromAttributes resolves the image configuration descriptor using manifest attributes.
+//
+// The caller can then use the descriptor to resolve and process the
+// configuration of the image.
+func ConfigFromAttributes(ctx context.Context, provider content.Provider, image ocispec.Descriptor, platform platforms.MatchComparer) (ocispec.ImageConfig, error) {
+	manifest, err := Manifest(ctx, provider, image, platform)
+	if err != nil {
+		return ocispec.ImageConfig{}, err
+	}
+
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		return ocispec.ImageConfig{}, err
+	}
+	d := digest.FromBytes(manifestBytes)
+
+	desc := ocispec.Descriptor{
+		MediaType:   ocispec.MediaTypeImageManifest,
+		Digest:      d,
+		Size:        int64(len(manifestBytes)),
+		Annotations: manifest.Annotations,
+	}
+
+	node, err := v2.NewNode(d.String(), desc)
+	if err != nil {
+		return ocispec.ImageConfig{}, err
+	}
+
+	props := node.Properties
+	if props == nil || !props.HasRuntimeInfo() {
+		return ocispec.ImageConfig{}, err
+	}
+
+	return *props.Runtime, err
 }
 
 // Platforms returns one or more platforms supported by the image.

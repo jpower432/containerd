@@ -19,23 +19,24 @@ package containerd
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync/atomic"
+
+	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/identity"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/diff"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/pkg/kmutex"
 	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/rootfs"
 	"github.com/containerd/containerd/snapshots"
-	"github.com/opencontainers/go-digest"
-	"github.com/opencontainers/image-spec/identity"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"golang.org/x/sync/semaphore"
 )
 
 // Image describes an image used by containers
@@ -56,6 +57,8 @@ type Image interface {
 	Usage(context.Context, ...UsageOpt) (int64, error)
 	// Config descriptor for the image.
 	Config(ctx context.Context) (ocispec.Descriptor, error)
+	// ConfigWithAttributes return image config information.
+	ConfigWithAttributes(ctx context.Context) (ocispec.ImageConfig, error)
 	// IsUnpacked returns whether or not an image is unpacked.
 	IsUnpacked(context.Context, string) (bool, error)
 	// ContentStore provides a content store which contains image blob data
@@ -112,6 +115,7 @@ func WithManifestUsage() UsageOpt {
 }
 
 var _ = (Image)(&image{})
+var _ = (oci.Image)(&image{})
 
 // NewImage returns a client image object from the metadata image
 func NewImage(client *Client, i images.Image) Image {
@@ -155,8 +159,16 @@ func (i *image) Labels() map[string]string {
 }
 
 func (i *image) RootFS(ctx context.Context) ([]digest.Digest, error) {
-	provider := i.client.ContentStore()
-	return i.i.RootFS(ctx, provider, i.platform)
+	cs := i.client.ContentStore()
+	manifest, err := images.Manifest(ctx, cs, i.i.Target, i.platform)
+	if err != nil {
+		return nil, err
+	}
+	var digests []digest.Digest
+	for _, layer := range manifest.Layers {
+		digests = append(digests, layer.Digest)
+	}
+	return digests, nil
 }
 
 func (i *image) Size(ctx context.Context) (int64, error) {
@@ -258,14 +270,18 @@ func (i *image) Config(ctx context.Context) (ocispec.Descriptor, error) {
 	return i.i.Config(ctx, provider, i.platform)
 }
 
+func (i *image) ConfigWithAttributes(ctx context.Context) (ocispec.ImageConfig, error) {
+	provider := i.client.ContentStore()
+	return i.i.ConfigWithAttributes(ctx, provider, i.platform)
+}
+
 func (i *image) IsUnpacked(ctx context.Context, snapshotterName string) (bool, error) {
 	sn, err := i.client.getSnapshotter(ctx, snapshotterName)
 	if err != nil {
 		return false, err
 	}
-	cs := i.client.ContentStore()
 
-	diffs, err := i.i.RootFS(ctx, cs, i.platform)
+	diffs, err := i.RootFS(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -354,14 +370,14 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string, opts ...Unpa
 		return err
 	}
 
-	layers, err := i.getLayers(ctx, i.platform, manifest)
+	artifacts, err := i.getArtifacts(ctx, i.platform, manifest)
 	if err != nil {
 		return err
 	}
 
 	var (
-		a  = i.client.DiffService()
 		cs = i.client.ContentStore()
+		a  = &artifactApplier{&contentStore{cs}}
 
 		chain    []digest.Digest
 		unpacked bool
@@ -380,8 +396,8 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string, opts ...Unpa
 		}
 	}
 
-	for _, layer := range layers {
-		unpacked, err = rootfs.ApplyLayerWithOpts(ctx, layer, chain, sn, a, config.SnapshotOpts, config.ApplyOpts)
+	for _, artifact := range artifacts {
+		unpacked, err = ApplyArtifactWithOpts(ctx, artifact, chain, sn, a, config.SnapshotOpts, config.ApplyOpts)
 		if err != nil {
 			return err
 		}
@@ -390,9 +406,9 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string, opts ...Unpa
 			// Set the uncompressed label after the uncompressed
 			// digest has been verified through apply.
 			cinfo := content.Info{
-				Digest: layer.Blob.Digest,
+				Digest: artifact.Blob.Digest,
 				Labels: map[string]string{
-					"containerd.io/uncompressed": layer.Diff.Digest.String(),
+					"containerd.io/uncompressed": artifact.Blob.Digest.String(),
 				},
 			}
 			if _, err := cs.Update(ctx, cinfo, "labels.containerd.io/uncompressed"); err != nil {
@@ -400,7 +416,7 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string, opts ...Unpa
 			}
 		}
 
-		chain = append(chain, layer.Diff.Digest)
+		chain = append(chain, artifact.Blob.Digest)
 	}
 
 	desc, err := i.i.Config(ctx, cs, i.platform)
@@ -430,25 +446,12 @@ func (i *image) getManifest(ctx context.Context, platform platforms.MatchCompare
 	return manifest, nil
 }
 
-func (i *image) getLayers(ctx context.Context, platform platforms.MatchComparer, manifest ocispec.Manifest) ([]rootfs.Layer, error) {
-	cs := i.ContentStore()
-	diffIDs, err := i.i.RootFS(ctx, cs, platform)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve rootfs: %w", err)
+func (i *image) getArtifacts(ctx context.Context, platform platforms.MatchComparer, manifest ocispec.Manifest) ([]Artifact, error) {
+	artifacts := make([]Artifact, len(manifest.Layers))
+	for i := range manifest.Layers {
+		artifacts[i].Blob = manifest.Layers[i]
 	}
-	if len(diffIDs) != len(manifest.Layers) {
-		return nil, errors.New("mismatched image rootfs and manifest layers")
-	}
-	layers := make([]rootfs.Layer, len(diffIDs))
-	for i := range diffIDs {
-		layers[i].Diff = ocispec.Descriptor{
-			// TODO: derive media type from compressed type
-			MediaType: ocispec.MediaTypeImageLayer,
-			Digest:    diffIDs[i],
-		}
-		layers[i].Blob = manifest.Layers[i]
-	}
-	return layers, nil
+	return artifacts, nil
 }
 
 func (i *image) getManifestPlatform(ctx context.Context, manifest ocispec.Manifest) (ocispec.Platform, error) {
@@ -488,4 +491,18 @@ func (i *image) ContentStore() content.Store {
 
 func (i *image) Platform() platforms.MatchComparer {
 	return i.platform
+}
+
+type contentStore struct {
+	content.Store
+}
+
+func (c *contentStore) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, error) {
+	ra, err := c.Store.ReaderAt(ctx, desc)
+	if err != nil {
+		return nil, err
+	}
+	rdr := content.NewReader(ra)
+	rc := io.NopCloser(rdr)
+	return rc, nil
 }

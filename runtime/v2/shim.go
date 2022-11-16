@@ -25,6 +25,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/containerd/ttrpc"
+	"github.com/hashicorp/go-multierror"
+	"github.com/sirupsen/logrus"
+
 	eventstypes "github.com/containerd/containerd/api/events"
 	"github.com/containerd/containerd/api/runtime/task/v2"
 	"github.com/containerd/containerd/api/types"
@@ -38,9 +42,6 @@ import (
 	ptypes "github.com/containerd/containerd/protobuf/types"
 	"github.com/containerd/containerd/runtime"
 	client "github.com/containerd/containerd/runtime/v2/shim"
-	"github.com/containerd/ttrpc"
-	"github.com/hashicorp/go-multierror"
-	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -355,6 +356,8 @@ func (s *shimTask) Create(ctx context.Context, opts runtime.CreateOpts) (runtime
 		Checkpoint: opts.Checkpoint,
 		Options:    protobuf.FromAny(topts),
 	}
+	fmt.Println("rootfs")
+	fmt.Println(opts.Rootfs)
 	for _, m := range opts.Rootfs {
 		request.Rootfs = append(request.Rootfs, &types.Mount{
 			Type:    m.Type,
